@@ -1,0 +1,1070 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Threads Seed｜投稿を育てる分析ノート</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;800&family=Noto+Serif+JP:wght@700&family=Shippori+Mincho:wght@700;800&display=swap" rel="stylesheet">
+<style>
+  html,body{margin:0;padding:0;background:#F7F5EF;}
+  #boot{font-family:'Noto Sans JP',system-ui,sans-serif;color:#7C7A70;text-align:center;padding:60px 20px;font-size:14px;}
+</style>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+</head>
+<body>
+<div id="root"><div id="boot">読み込み中… （初回はライブラリの読み込みに数秒かかります）</div></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useRef } = React;
+
+/* ---------- 保存先: localStorage（GitHub Pages / 通常ブラウザ用の window.storage 互換シム） ---------- */
+window.storage = {
+  async get(key){ const v = localStorage.getItem(key); if(v===null) throw new Error("not found"); return {key, value:v, shared:false}; },
+  async set(key, value){ localStorage.setItem(key, value); return {key, value, shared:false}; },
+  async delete(key){ localStorage.removeItem(key); return {key, deleted:true, shared:false}; },
+  async list(prefix=""){ const keys=[]; for(let i=0;i<localStorage.length;i++){ const k=localStorage.key(i); if(k && k.startsWith(prefix)) keys.push(k);} return {keys, prefix, shared:false}; },
+};
+
+
+/* =========================================================================
+   Threads Seed ｜ 投稿を育てる分析ノート
+   - GPTsで分析した結果を「記録・整理・比較・見える化」するためのMVP
+   - アプリ内AI分析なし / Threads API連携なし / 成長演出なし
+   - 永続保存: window.storage（本文データは1キー、スクショは投稿ごとに別キー）
+   ========================================================================= */
+
+const C = {
+  bg: "#F7F5EF",        // 生成り
+  surface: "#FFFFFF",
+  beige: "#EFE9DC",     // 薄いベージュ
+  beigeLine: "#E4DCCB",
+  green: "#7FA67F",     // 淡いグリーン
+  greenDeep: "#4F6E54",
+  greenSoft: "#E7EFE5",
+  ink: "#2E2E2A",
+  inkSub: "#7C7A70",
+  line: "#E6E0D4",
+  warn: "#C08A57",
+};
+
+const GENRES = ["HSP","HSC / 子育て","会社員のしんどさ","AIジャーナリング","夫婦","不登校 / 学校","朝活","note誘導","日常","その他"];
+const TYPES  = ["共感","図解","4コマ","ノウハウ","問いかけ","宣言","失敗談","気づき","note誘導","その他"];
+const PURPOSES = ["フォロワー増加","共感を集める","返信を増やす","noteへ誘導する","プロフィールへ誘導する","保存される投稿にする","シリーズ化する","反応を見る実験投稿"];
+
+const STORE_KEY = "tsa:posts:v1";
+const FOLLOWER_KEY = "tsa:followers:v1";
+const imgKey = (id) => `tsa:img:${id}`;
+
+/* ---------- storage helpers (window.storage / fail-safe) ---------- */
+async function loadPosts() {
+  try {
+    const r = await window.storage.get(STORE_KEY);
+    if (r && r.value) return JSON.parse(r.value);
+  } catch (e) { /* キー未作成 = まだ投稿なし */ }
+  return [];
+}
+async function persistPosts(posts) {
+  try { await window.storage.set(STORE_KEY, JSON.stringify(posts)); }
+  catch (e) { console.error("保存に失敗:", e); }
+}
+async function loadImage(id) {
+  try { const r = await window.storage.get(imgKey(id)); return r ? r.value : null; }
+  catch { return null; }
+}
+async function saveImage(id, data) {
+  try { await window.storage.set(imgKey(id), data); } catch (e) { console.error("画像保存に失敗:", e); }
+}
+async function deleteImage(id) {
+  try { await window.storage.delete(imgKey(id)); } catch {}
+}
+async function loadFollowers() {
+  try { const r = await window.storage.get(FOLLOWER_KEY); if (r && r.value) return JSON.parse(r.value); }
+  catch (e) { /* 未作成 */ }
+  return [];
+}
+async function persistFollowers(arr) {
+  try { await window.storage.set(FOLLOWER_KEY, JSON.stringify(arr)); }
+  catch (e) { console.error("フォロワー保存に失敗:", e); }
+}
+
+/* ---------- date helpers ---------- */
+const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; };
+const nowTime = () => { const d = new Date(); return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`; };
+function weekStart() { const d = new Date(); const day = (d.getDay()+6)%7; d.setHours(0,0,0,0); d.setDate(d.getDate()-day); return d; }
+function inThisWeek(dateStr){ if(!dateStr) return false; const d=new Date(dateStr+"T00:00:00"); return d>=weekStart(); }
+function inThisMonth(dateStr){ if(!dateStr) return false; const d=new Date(dateStr+"T00:00:00"); const n=new Date(); return d.getFullYear()===n.getFullYear()&&d.getMonth()===n.getMonth(); }
+function shiftDateStr(dateStr, days){ const d=new Date(dateStr+"T00:00:00"); d.setDate(d.getDate()-days); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
+function entryOnOrBefore(sortedAsc, target){ let r=null; for(const e of sortedAsc){ if(e.date<=target) r=e; else break; } return r; }
+const mmdd = (s)=> s ? s.slice(5).replace("-","/") : "";
+const num = (v) => { const n = parseInt(v,10); return isNaN(n)?0:n; };
+const reactions = (p) => num(p.likes)+num(p.replies)+num(p.reposts)+num(p.quotes);
+
+/* ---------- empty form ---------- */
+const emptyPost = () => ({
+  id: "p_" + Date.now() + "_" + Math.random().toString(36).slice(2,7),
+  date: todayStr(), time: nowTime(), body: "",
+  genre: GENRES[0], type: TYPES[0], purpose: PURPOSES[0],
+  likes:"", replies:"", reposts:"", quotes:"", views:"",
+  followerBefore:"", followerAfter:"",
+  noteLink:false, noteText:"",
+  gptResult:"", gptScore:"", reason:"", improve:"", next:"", memo:"",
+  hasImage:false, createdAt: Date.now(),
+});
+const followerDelta = (p) => {
+  const a=num(p.followerAfter), b=num(p.followerBefore);
+  if(p.followerAfter==="") return 0;
+  return a-b;
+};
+
+/* ---------- GPTs出力の自動反映パーサ ---------- */
+// 1つの内部フィールドに対し、JSON/項目リストどちらでも拾えるよう別名を持たせる
+const FIELD_ALIASES = {
+  date:["投稿日","date"], time:["投稿時間","time"], body:["投稿本文","本文","body"],
+  genre:["投稿ジャンル","ジャンル","genre"], type:["投稿タイプ","タイプ","type"], purpose:["投稿目的","目的","purpose"],
+  likes:["いいね数","いいね","likes"], replies:["返信数","返信","replies"], reposts:["再投稿数","再投稿","reposts"],
+  quotes:["引用数","引用","quotes"], views:["表示数","表示","views"],
+  followerBefore:["投稿前フォロワー数","投稿前フォロワー","followerBefore"],
+  followerAfter:["投稿後フォロワー数","投稿後フォロワー","followerAfter"],
+  noteLink:["noteリンク","note誘導","noteLink"], noteText:["note誘導文","noteText"],
+  gptResult:["GPTs分析結果","分析","分析結果","gptResult"], gptScore:["GPTs評価","評価","gptScore"],
+  reason:["伸びた理由","理由","reason"], improve:["改善点","improve"],
+  next:["次に試すこと","次","next"], memo:["メモ","memo"],
+};
+function parseGptOutput(text){
+  if(!text || !text.trim()) return {};
+  let raw = text.trim().replace(/^```[a-zA-Z]*\s*/,"").replace(/```$/,"").trim();
+  let obj = null;
+  try { obj = JSON.parse(raw); } catch {}
+  if(!obj || typeof obj!=="object"){
+    obj = {};
+    raw.split(/\r?\n/).forEach(line=>{
+      const m = line.match(/^\s*[-・*]?\s*(.+?)\s*[:：]\s*(.*)$/);
+      if(m) obj[m[1].trim()] = m[2].trim();
+    });
+  }
+  const result = {};
+  for(const [field,aliases] of Object.entries(FIELD_ALIASES)){
+    for(const a of aliases){
+      if(obj[a]!==undefined && obj[a]!=="" && obj[a]!==null){ result[field]=obj[a]; break; }
+    }
+  }
+  return result;
+}
+function matchOption(val, options){
+  if(val===undefined||val===null) return null;
+  const v = String(val).trim();
+  return options.find(o=>o===v) || options.find(o=>v.includes(o)||o.includes(v)) || null;
+}
+function boolify(v){ return typeof v==="boolean" ? v : /あり|true|yes|有|1/i.test(String(v)); }
+
+/* =========================================================================
+   Root
+   ========================================================================= */
+function App() {
+  const [posts, setPosts] = useState([]);
+  const [followers, setFollowers] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [view, setView] = useState("dashboard"); // dashboard | followers | list | register | analysis | detail
+  const [editing, setEditing] = useState(null);   // form object
+  const [detailId, setDetailId] = useState(null);
+
+  useEffect(() => { (async () => { setPosts(await loadPosts()); setFollowers(await loadFollowers()); setLoaded(true); })(); }, []);
+
+  async function saveFollower(date, count) {
+    const c = num(count);
+    const next = [...followers.filter(f=>f.date!==date), {date, count:c}].sort((a,b)=>a.date.localeCompare(b.date));
+    setFollowers(next); await persistFollowers(next);
+  }
+  async function removeFollower(date) {
+    const next = followers.filter(f=>f.date!==date);
+    setFollowers(next); await persistFollowers(next);
+  }
+
+  async function exportData() {
+    const data = { app:"threads-seed", version:1, exportedAt:new Date().toISOString(), posts, followers, images:{} };
+    try {
+      const { keys } = await window.storage.list("tsa:img:");
+      for (const k of keys) { try { const r = await window.storage.get(k); if (r && r.value) data.images[k] = r.value; } catch {} }
+    } catch {}
+    const blob = new Blob([JSON.stringify(data)], { type:"application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `threads-seed-backup-${todayStr()}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  }
+  async function importData(json, mode) {
+    let nPosts = Array.isArray(json.posts) ? json.posts : [];
+    let nFollowers = Array.isArray(json.followers) ? json.followers : [];
+    if (mode === "merge") {
+      const pMap = new Map(posts.map(p=>[p.id,p])); nPosts.forEach(p=>pMap.set(p.id,p)); nPosts=[...pMap.values()];
+      const fMap = new Map(followers.map(f=>[f.date,f])); nFollowers.forEach(f=>fMap.set(f.date,f)); nFollowers=[...fMap.values()];
+    }
+    setPosts(nPosts); await persistPosts(nPosts);
+    setFollowers(nFollowers); await persistFollowers(nFollowers);
+    if (json.images) { for (const [k,v] of Object.entries(json.images)) { try { await window.storage.set(k,v); } catch {} } }
+  }
+
+  const sorted = useMemo(() =>
+    [...posts].sort((a,b) => (b.date+b.time).localeCompare(a.date+a.time)), [posts]);
+
+  async function commit(next) { setPosts(next); await persistPosts(next); }
+
+  async function handleSave(form, imageData) {
+    const exists = posts.some(p => p.id === form.id);
+    const toSave = { ...form };
+    if (imageData !== undefined) {
+      if (imageData) { await saveImage(form.id, imageData); toSave.hasImage = true; }
+      else { await deleteImage(form.id); toSave.hasImage = false; }
+    }
+    const next = exists ? posts.map(p => p.id===form.id ? toSave : p) : [...posts, toSave];
+    await commit(next);
+    setEditing(null);
+    setView(exists ? "detail" : "list");
+    if (exists) setDetailId(form.id);
+  }
+  async function handleDelete(id) {
+    await deleteImage(id);
+    await commit(posts.filter(p => p.id !== id));
+    setDetailId(null); setView("list");
+  }
+
+  if (!loaded) return <Shell><div style={{padding:40,textAlign:"center",color:C.inkSub}}>読み込み中…</div></Shell>;
+
+  return (
+    <Shell>
+      <Header view={view} />
+      <Nav view={view} setView={(v)=>{ if(v==="register"){setEditing(emptyPost());} setView(v); }} />
+
+      <div style={{padding:"4px 16px 28px"}}>
+        {view==="dashboard" && <Dashboard posts={sorted} followers={followers} go={(v,id)=>{setDetailId(id);setView(v);}} />}
+        {view==="followers" && <FollowerLog followers={followers} onSave={saveFollower} onDelete={removeFollower} />}
+        {view==="data" && <Backup posts={posts} followers={followers} onExport={exportData} onImport={importData} />}
+        {view==="list" && <PostList posts={sorted} open={(id)=>{setDetailId(id);setView("detail");}}
+                            onNew={()=>{setEditing(emptyPost());setView("register");}} />}
+        {view==="register" && <PostForm initial={editing||emptyPost()} onSave={handleSave}
+                                onCancel={()=>setView(editing && posts.some(p=>p.id===editing.id)?"detail":"list")} />}
+        {view==="analysis" && <Analysis posts={sorted} />}
+        {view==="detail" && (() => {
+          const p = posts.find(x=>x.id===detailId);
+          if(!p) return <Empty msg="投稿が見つかりません" />;
+          return <Detail post={p} onBack={()=>setView("list")}
+                   onEdit={()=>{setEditing(p);setView("register");}} onDelete={()=>handleDelete(p.id)} />;
+        })()}
+      </div>
+    </Shell>
+  );
+}
+
+/* =========================================================================
+   Layout
+   ========================================================================= */
+function Shell({children}) {
+  return (
+    <div style={{
+      fontFamily:"'Hiragino Kaku Gothic ProN','Noto Sans JP',system-ui,sans-serif",
+      color:C.ink, background:C.bg, minHeight:"100vh",
+      WebkitFontSmoothing:"antialiased",
+    }}>
+      <style>{`
+        * { box-sizing:border-box; }
+        input,textarea,select,button{ font-family:inherit; }
+        textarea{ resize:vertical; }
+        .tsa-in{ width:100%; padding:9px 11px; border:1px solid ${C.line}; border-radius:9px;
+          background:${C.surface}; font-size:14px; color:${C.ink}; outline:none; }
+        .tsa-in:focus{ border-color:${C.green}; box-shadow:0 0 0 3px ${C.greenSoft}; }
+        .tsa-card{ background:${C.surface}; border:1px solid ${C.line}; border-radius:14px; }
+        .tsa-btn{ cursor:pointer; border:none; border-radius:10px; font-size:14px; font-weight:600; padding:10px 16px; }
+        @media (prefers-reduced-motion: no-preference){ .tsa-card{ transition:box-shadow .15s, transform .15s; } }
+      `}</style>
+      <div style={{maxWidth:760, margin:"0 auto"}}>{children}</div>
+    </div>
+  );
+}
+
+function Header() {
+  return (
+    <div style={{padding:"22px 16px 8px"}}>
+      <div style={{display:"flex",alignItems:"baseline",gap:10}}>
+        <h1 style={{margin:0,fontSize:20,fontWeight:800,letterSpacing:".02em",
+          fontFamily:"'Shippori Mincho','Noto Serif JP',serif"}}>Threads Seed</h1>
+        <span style={{fontSize:12,color:C.inkSub}}>投稿を育てる分析ノート</span>
+      </div>
+    </div>
+  );
+}
+
+function Nav({view,setView}) {
+  const tabs = [["dashboard","ダッシュボード"],["followers","フォロワー"],["register","投稿登録"],["list","投稿一覧"],["analysis","分析・比較"],["data","データ"]];
+  return (
+    <div style={{display:"flex",gap:6,padding:"6px 16px 14px",overflowX:"auto"}}>
+      {tabs.map(([k,label])=>{
+        const active = view===k || (view==="detail"&&k==="list");
+        return (
+          <button key={k} onClick={()=>setView(k)} className="tsa-btn"
+            style={{whiteSpace:"nowrap",
+              background: active?C.greenDeep:C.surface,
+              color: active?"#fff":C.inkSub,
+              border:`1px solid ${active?C.greenDeep:C.line}`,
+              padding:"8px 14px", fontWeight:active?700:500}}>
+            {label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function Empty({msg}) {
+  return <div className="tsa-card" style={{padding:32,textAlign:"center",color:C.inkSub}}>{msg}</div>;
+}
+
+/* =========================================================================
+   Dashboard
+   ========================================================================= */
+function Dashboard({posts, followers, go}) {
+  const m = useMemo(()=>{
+    const fSorted = [...(followers||[])].sort((a,b)=>a.date.localeCompare(b.date));
+    const latestF = fSorted[fSorted.length-1];
+    const postCurrent = posts.find(p=>p.followerAfter!=="");
+    // 日次記録があればそれを現在値に、なければ投稿データから
+    const current = latestF ? {followerAfter:latestF.count, date:latestF.date} : postCurrent;
+    const today = posts.filter(p=>p.date===todayStr()).reduce((s,p)=>s+followerDelta(p),0);
+    const week  = posts.filter(p=>inThisWeek(p.date)).reduce((s,p)=>s+followerDelta(p),0);
+    const month = posts.filter(p=>inThisMonth(p.date)).reduce((s,p)=>s+followerDelta(p),0);
+    const noteCount = posts.filter(p=>p.noteLink).length;
+    const topReaction = [...posts].sort((a,b)=>reactions(b)-reactions(a))[0];
+    const topGrowth   = [...posts].sort((a,b)=>followerDelta(b)-followerDelta(a)).find(p=>followerDelta(p)>0);
+    const topNote     = [...posts].filter(p=>p.noteLink).sort((a,b)=>reactions(b)-reactions(a))[0];
+    const nexts = posts.filter(p=>p.next&&p.next.trim()).slice(0,4);
+    return {current, today, week, month, noteCount, topReaction, topGrowth, topNote, nexts};
+  },[posts, followers]);
+
+  if(posts.length===0) return <Empty msg="まだ投稿がありません。「投稿登録」から最初の1件を記録しましょう。" />;
+
+  const Stat = ({label,value,sub,accent}) => (
+    <div className="tsa-card" style={{padding:"14px 14px",flex:"1 1 0",minWidth:0}}>
+      <div style={{fontSize:11.5,color:C.inkSub,marginBottom:6}}>{label}</div>
+      <div style={{fontSize:24,fontWeight:800,color:accent||C.ink,lineHeight:1}}>{value}</div>
+      {sub && <div style={{fontSize:11,color:C.inkSub,marginTop:5}}>{sub}</div>}
+    </div>
+  );
+  const signed = (n)=> (n>0?"+":"")+n;
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      <div style={{display:"flex",gap:10}}>
+        <Stat label="現在のフォロワー" value={m.current?num(m.current.followerAfter).toLocaleString():"—"}
+          sub={m.current?`${m.current.date} 時点`:""} accent={C.greenDeep} />
+        <Stat label="今日の増加" value={signed(m.today)} accent={m.today>0?C.greenDeep:C.ink} />
+      </div>
+      <div style={{display:"flex",gap:10}}>
+        <Stat label="今週の増加" value={signed(m.week)} accent={m.week>0?C.greenDeep:C.ink} />
+        <Stat label="今月の増加" value={signed(m.month)} accent={m.month>0?C.greenDeep:C.ink} />
+      </div>
+      <div style={{display:"flex",gap:10}}>
+        <Stat label="投稿数" value={posts.length} />
+        <Stat label="note誘導投稿数" value={m.noteCount} sub={`全体の${Math.round(m.noteCount/posts.length*100)}%`} />
+      </div>
+
+      <Highlight title="反応がよかった投稿" post={m.topReaction} metric={m.topReaction?`反応 ${reactions(m.topReaction)}`:""} go={go} />
+      <Highlight title="フォロワー増加につながった投稿" post={m.topGrowth} metric={m.topGrowth?`+${followerDelta(m.topGrowth)} フォロワー`:"まだなし"} go={go} />
+      <Highlight title="note誘導につながった投稿" post={m.topNote} metric={m.topNote?`反応 ${reactions(m.topNote)}・note誘導`:"まだなし"} go={go} />
+
+      <div className="tsa-card" style={{padding:"14px 16px"}}>
+        <div style={{fontSize:13,fontWeight:700,marginBottom:10}}>次に試すこと</div>
+        {m.nexts.length===0 && <div style={{fontSize:13,color:C.inkSub}}>各投稿の「次に試すこと」がここに集まります。</div>}
+        {m.nexts.map((p,i)=>(
+          <div key={i} onClick={()=>go("detail",p.id)} style={{display:"flex",gap:9,padding:"8px 0",
+            borderTop:i?`1px solid ${C.line}`:"none",cursor:"pointer"}}>
+            <span style={{color:C.green,fontWeight:800}}>›</span>
+            <div><div style={{fontSize:13.5}}>{p.next}</div>
+              <div style={{fontSize:11,color:C.inkSub,marginTop:2}}>{p.date}・{p.genre}</div></div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Highlight({title,post,metric,go}) {
+  return (
+    <div className="tsa-card" style={{padding:"14px 16px"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
+        <div style={{fontSize:13,fontWeight:700}}>{title}</div>
+        <div style={{fontSize:12,color:C.greenDeep,fontWeight:700}}>{metric}</div>
+      </div>
+      {post ? (
+        <div onClick={()=>go("detail",post.id)} style={{cursor:"pointer"}}>
+          <div style={{fontSize:13.5,color:C.ink,display:"-webkit-box",WebkitLineClamp:2,
+            WebkitBoxOrient:"vertical",overflow:"hidden",lineHeight:1.55}}>
+            {post.body||"（本文なし）"}
+          </div>
+          <div style={{fontSize:11,color:C.inkSub,marginTop:6}}>{post.date} {post.time}・{post.genre}・{post.type}</div>
+        </div>
+      ) : <div style={{fontSize:13,color:C.inkSub}}>該当なし</div>}
+    </div>
+  );
+}
+
+/* =========================================================================
+   Follower Log（日次フォロワー記録・棒グラフ）
+   ========================================================================= */
+function FollowerLog({followers, onSave, onDelete}) {
+  const [date,setDate]=useState(todayStr());
+  const [count,setCount]=useState("");
+  const [range,setRange]=useState(14); // 表示日数
+
+  const sorted = useMemo(()=>[...followers].sort((a,b)=>a.date.localeCompare(b.date)),[followers]);
+
+  const stats = useMemo(()=>{
+    if(sorted.length===0) return null;
+    const latest = sorted[sorted.length-1];
+    const prev   = sorted[sorted.length-2];
+    const wBase  = entryOnOrBefore(sorted, shiftDateStr(latest.date,7));
+    const mBase  = entryOnOrBefore(sorted, shiftDateStr(latest.date,30));
+    const calc = (base)=> (!base || base.date===latest.date) ? null
+      : { delta: latest.count-base.count, rate: base.count? (latest.count-base.count)/base.count*100 : null, from: base };
+    return { latest, day: calc(prev), week: calc(wBase), month: calc(mBase) };
+  },[sorted]);
+
+  // 直近の差分（棒グラフ用）
+  const series = useMemo(()=>{
+    const s=[];
+    for(let i=1;i<sorted.length;i++) s.push({date:sorted[i].date, count:sorted[i].count, delta:sorted[i].count-sorted[i-1].count});
+    return s.slice(-range);
+  },[sorted,range]);
+
+  function submit(){
+    if(count==="" || isNaN(parseInt(count,10))){ return; }
+    onSave(date, count); setCount("");
+  }
+  const exists = sorted.some(f=>f.date===date);
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      {/* 入力 */}
+      <div className="tsa-card" style={{padding:"16px"}}>
+        <div style={{fontSize:13,fontWeight:700,color:C.greenDeep,marginBottom:12}}>今日のフォロワー数を記録</div>
+        <div style={{display:"flex",gap:10,alignItems:"flex-end",flexWrap:"wrap"}}>
+          <div style={{flex:"1 1 130px"}}>
+            <div style={{fontSize:11,color:C.inkSub,marginBottom:5}}>日付</div>
+            <input className="tsa-in" type="date" value={date} onChange={e=>setDate(e.target.value)} />
+          </div>
+          <div style={{flex:"1 1 130px"}}>
+            <div style={{fontSize:11,color:C.inkSub,marginBottom:5}}>フォロワー数</div>
+            <input className="tsa-in" type="number" inputMode="numeric" value={count}
+              onChange={e=>setCount(e.target.value)} placeholder="例 1240" />
+          </div>
+          <button className="tsa-btn" onClick={submit} style={{background:C.greenDeep,color:"#fff",flex:"1 1 100px"}}>
+            {exists?"上書き記録":"記録する"}
+          </button>
+        </div>
+        {exists && <div style={{fontSize:11,color:C.warn,marginTop:8}}>この日付は既に記録があります。保存すると上書きします。</div>}
+      </div>
+
+      {!stats && <Empty msg="まだ記録がありません。今日のフォロワー数を入れて始めましょう。" />}
+
+      {stats && (
+        <>
+          {/* 現在値 + 増加率 */}
+          <div className="tsa-card" style={{padding:"16px"}}>
+            <div style={{fontSize:11.5,color:C.inkSub}}>現在のフォロワー</div>
+            <div style={{fontSize:30,fontWeight:800,color:C.greenDeep,lineHeight:1.1,marginBottom:2}}>{stats.latest.count.toLocaleString()}</div>
+            <div style={{fontSize:11,color:C.inkSub,marginBottom:14}}>{stats.latest.date} 時点</div>
+            <div style={{display:"flex",gap:10}}>
+              <RateCard label="1日" d={stats.day} />
+              <RateCard label="1週間" d={stats.week} />
+              <RateCard label="1ヶ月" d={stats.month} />
+            </div>
+          </div>
+
+          {/* 棒グラフ */}
+          <div className="tsa-card" style={{padding:"16px 14px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+              <div style={{fontSize:13,fontWeight:700}}>毎日の増減</div>
+              <div style={{display:"flex",gap:4}}>
+                {[14,30].map(r=>(
+                  <button key={r} className="tsa-btn" onClick={()=>setRange(r)}
+                    style={{padding:"5px 10px",fontSize:12,background:range===r?C.greenDeep:"#fff",
+                      color:range===r?"#fff":C.inkSub,border:`1px solid ${range===r?C.greenDeep:C.line}`}}>{r}日</button>
+                ))}
+              </div>
+            </div>
+            <div style={{fontSize:11,color:C.inkSub,marginBottom:14}}>前日比の増減数（記録した日のみ）</div>
+            <DeltaBars series={series} />
+          </div>
+
+          {/* 記録一覧 */}
+          <div className="tsa-card" style={{padding:"14px 16px"}}>
+            <div style={{fontSize:13,fontWeight:700,marginBottom:8}}>記録の履歴</div>
+            {[...sorted].reverse().slice(0,30).map((f,i,arr)=>{
+              const idx = sorted.findIndex(x=>x.date===f.date);
+              const d = idx>0 ? f.count - sorted[idx-1].count : null;
+              return (
+                <div key={f.date} style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+                  padding:"9px 0",borderTop:i?`1px solid ${C.line}`:"none"}}>
+                  <div style={{fontSize:13}}>{f.date}</div>
+                  <div style={{display:"flex",alignItems:"center",gap:14}}>
+                    <span style={{fontSize:13,fontWeight:700}}>{f.count.toLocaleString()}</span>
+                    <span style={{fontSize:12,minWidth:46,textAlign:"right",
+                      color:d>0?C.greenDeep:d<0?C.warn:C.inkSub,fontWeight:600}}>
+                      {d===null?"—":(d>0?"+":"")+d}
+                    </span>
+                    <button onClick={()=>onDelete(f.date)} title="削除"
+                      style={{border:"none",background:"none",color:C.inkSub,cursor:"pointer",fontSize:15,lineHeight:1}}>×</button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function RateCard({label,d}) {
+  const pos = d && d.delta>0, neg = d && d.delta<0;
+  const color = pos?C.greenDeep:neg?C.warn:C.inkSub;
+  return (
+    <div style={{flex:1,background:C.bg,borderRadius:10,padding:"11px 8px",textAlign:"center"}}>
+      <div style={{fontSize:11,color:C.inkSub,marginBottom:5}}>{label}</div>
+      {d ? (
+        <>
+          <div style={{fontSize:17,fontWeight:800,color}}>{pos?"+":""}{d.delta}</div>
+          <div style={{fontSize:11,color,marginTop:2}}>{d.rate==null?"":(pos?"+":"")+d.rate.toFixed(1)+"%"}</div>
+        </>
+      ) : <div style={{fontSize:13,color:C.inkSub,paddingTop:4}}>—</div>}
+    </div>
+  );
+}
+
+function DeltaBars({series}) {
+  if(series.length===0) return <div style={{fontSize:13,color:C.inkSub,textAlign:"center",padding:"20px 0"}}>記録が2日分たまると増減が表示されます。</div>;
+  const maxAbs = Math.max(...series.map(s=>Math.abs(s.delta)),1);
+  const H=70; // 上下それぞれの最大高さ
+  return (
+    <div>
+      <div style={{display:"flex",alignItems:"stretch",gap:series.length>20?2:4,height:H*2+2}}>
+        {series.map((s,i)=>{
+          const h = Math.max(2, Math.abs(s.delta)/maxAbs*H);
+          const up = s.delta>=0;
+          return (
+            <div key={i} title={`${s.date}: ${s.delta>0?"+":""}${s.delta}`}
+              style={{flex:1,display:"flex",flexDirection:"column",justifyContent:"flex-start",minWidth:0}}>
+              <div style={{flex:1,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+                {up && <div style={{width:"72%",maxWidth:18,height:h,background:C.green,borderRadius:"3px 3px 0 0"}} />}
+              </div>
+              <div style={{height:2,background:C.beigeLine}} />
+              <div style={{flex:1,display:"flex",alignItems:"flex-start",justifyContent:"center"}}>
+                {!up && <div style={{width:"72%",maxWidth:18,height:h,background:C.beige,borderRadius:"0 0 3px 3px",border:`1px solid ${C.beigeLine}`,borderTop:"none"}} />}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{display:"flex",gap:series.length>20?2:4,marginTop:5}}>
+        {series.map((s,i)=>(
+          <div key={i} style={{flex:1,textAlign:"center",fontSize:9,color:C.inkSub,minWidth:0,overflow:"hidden"}}>
+            {(series.length<=14 || i%Math.ceil(series.length/8)===0) ? mmdd(s.date) : ""}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   Post List
+   ========================================================================= */
+function PostList({posts, open, onNew}) {
+  const [fGenre,setFGenre]=useState("すべて");
+  const [fType,setFType]=useState("すべて");
+  const filtered = posts.filter(p=>(fGenre==="すべて"||p.genre===fGenre)&&(fType==="すべて"||p.type===fType));
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      <div style={{display:"flex",gap:8,alignItems:"center"}}>
+        <select className="tsa-in" value={fGenre} onChange={e=>setFGenre(e.target.value)} style={{flex:1}}>
+          {["すべて",...GENRES].map(g=><option key={g}>{g}</option>)}
+        </select>
+        <select className="tsa-in" value={fType} onChange={e=>setFType(e.target.value)} style={{flex:1}}>
+          {["すべて",...TYPES].map(t=><option key={t}>{t}</option>)}
+        </select>
+        <button className="tsa-btn" onClick={onNew}
+          style={{background:C.greenDeep,color:"#fff",whiteSpace:"nowrap"}}>＋ 登録</button>
+      </div>
+
+      {filtered.length===0 && <Empty msg="該当する投稿がありません。" />}
+      {filtered.map(p=>(
+        <div key={p.id} className="tsa-card" onClick={()=>open(p.id)}
+          style={{padding:"13px 15px",cursor:"pointer"}}
+          onMouseEnter={e=>e.currentTarget.style.boxShadow="0 3px 14px rgba(79,110,84,.12)"}
+          onMouseLeave={e=>e.currentTarget.style.boxShadow="none"}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,gap:8}}>
+            <div style={{fontSize:11.5,color:C.inkSub}}>{p.date} {p.time}</div>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap",justifyContent:"flex-end"}}>
+              <Tag>{p.genre}</Tag><Tag soft>{p.type}</Tag>
+              {p.noteLink && <Tag note>note誘導</Tag>}
+            </div>
+          </div>
+          <div style={{fontSize:11,color:C.inkSub,marginBottom:8}}>目的：{p.purpose}</div>
+          <div style={{display:"flex",gap:14,fontSize:12.5,color:C.ink,marginBottom:8,flexWrap:"wrap"}}>
+            <span>♡ {num(p.likes)}</span>
+            <span>↩ {num(p.replies)}</span>
+            <span>👁 {num(p.views).toLocaleString()}</span>
+            <span style={{color:followerDelta(p)>0?C.greenDeep:C.inkSub,fontWeight:followerDelta(p)>0?700:400}}>
+              フォロワー {followerDelta(p)>0?"+":""}{followerDelta(p)}
+            </span>
+          </div>
+          {p.gptResult && (
+            <div style={{fontSize:12,color:C.inkSub,background:C.greenSoft,borderRadius:8,padding:"7px 9px",
+              display:"-webkit-box",WebkitLineClamp:2,WebkitBoxOrient:"vertical",overflow:"hidden"}}>
+              <b style={{color:C.greenDeep}}>GPTs:</b> {p.gptResult}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Tag({children,soft,note}) {
+  const style = note
+    ? {background:C.beige,color:C.warn,border:`1px solid ${C.beigeLine}`}
+    : soft ? {background:"#fff",color:C.inkSub,border:`1px solid ${C.line}`}
+           : {background:C.greenSoft,color:C.greenDeep,border:`1px solid ${C.greenSoft}`};
+  return <span style={{fontSize:11,fontWeight:600,padding:"2px 8px",borderRadius:20,...style}}>{children}</span>;
+}
+
+/* =========================================================================
+   Post Detail
+   ========================================================================= */
+function Detail({post, onBack, onEdit, onDelete}) {
+  const [img,setImg]=useState(null);
+  const [confirm,setConfirm]=useState(false);
+  useEffect(()=>{ if(post.hasImage) loadImage(post.id).then(setImg); },[post.id,post.hasImage]);
+
+  const Row = ({label,children}) => (
+    <div style={{padding:"11px 0",borderTop:`1px solid ${C.line}`}}>
+      <div style={{fontSize:11,color:C.inkSub,marginBottom:4}}>{label}</div>
+      <div style={{fontSize:14,lineHeight:1.65,whiteSpace:"pre-wrap"}}>{children||<span style={{color:C.inkSub}}>—</span>}</div>
+    </div>
+  );
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <button className="tsa-btn" onClick={onBack} style={{background:"#fff",border:`1px solid ${C.line}`,color:C.inkSub}}>‹ 一覧</button>
+        <div style={{display:"flex",gap:8}}>
+          <button className="tsa-btn" onClick={onEdit} style={{background:C.greenDeep,color:"#fff"}}>編集</button>
+          <button className="tsa-btn" onClick={()=>setConfirm(true)} style={{background:"#fff",border:`1px solid ${C.line}`,color:C.warn}}>削除</button>
+        </div>
+      </div>
+
+      <div className="tsa-card" style={{padding:"16px 18px"}}>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
+          <Tag>{post.genre}</Tag><Tag soft>{post.type}</Tag>
+          {post.noteLink && <Tag note>note誘導</Tag>}
+        </div>
+        <div style={{fontSize:11,color:C.inkSub,marginBottom:14}}>{post.date} {post.time}・目的：{post.purpose}</div>
+
+        <div style={{fontSize:14.5,lineHeight:1.75,whiteSpace:"pre-wrap"}}>{post.body||"（本文なし）"}</div>
+
+        {img && <img src={img} alt="投稿スクショ" style={{width:"100%",borderRadius:10,marginTop:14,border:`1px solid ${C.line}`}} />}
+
+        <div style={{display:"flex",gap:8,marginTop:16,flexWrap:"wrap"}}>
+          {[["いいね",num(post.likes)],["返信",num(post.replies)],["再投稿",num(post.reposts)],
+            ["引用",num(post.quotes)],["表示",num(post.views).toLocaleString()]].map(([l,v])=>(
+            <div key={l} style={{flex:"1 1 60px",textAlign:"center",background:C.bg,borderRadius:9,padding:"9px 4px"}}>
+              <div style={{fontSize:16,fontWeight:800}}>{v}</div>
+              <div style={{fontSize:10.5,color:C.inkSub}}>{l}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{textAlign:"center",marginTop:10,background:C.greenSoft,borderRadius:9,padding:"10px"}}>
+          <span style={{fontSize:12,color:C.inkSub}}>フォロワー </span>
+          <b style={{color:C.greenDeep,fontSize:15}}>{num(post.followerBefore)} → {num(post.followerAfter)}</b>
+          <span style={{color:C.greenDeep,fontWeight:800,marginLeft:8}}>({followerDelta(post)>0?"+":""}{followerDelta(post)})</span>
+        </div>
+      </div>
+
+      <div className="tsa-card" style={{padding:"4px 18px 14px"}}>
+        {post.noteLink && <Row label="note誘導文">{post.noteText}</Row>}
+        <Row label={`GPTs分析結果${post.gptScore?`（評価 ${post.gptScore}/5）`:""}`}>{post.gptResult}</Row>
+        <Row label="伸びた理由">{post.reason}</Row>
+        <Row label="改善点">{post.improve}</Row>
+        <Row label="次に試すこと">{post.next}</Row>
+        <Row label="メモ">{post.memo}</Row>
+      </div>
+
+      {confirm && (
+        <div onClick={()=>setConfirm(false)} style={{position:"fixed",inset:0,background:"rgba(46,46,42,.4)",
+          display:"flex",alignItems:"center",justifyContent:"center",zIndex:50,padding:20}}>
+          <div onClick={e=>e.stopPropagation()} className="tsa-card" style={{padding:22,maxWidth:320,textAlign:"center"}}>
+            <div style={{fontSize:14,marginBottom:16}}>この投稿を削除しますか？<br/>この操作は取り消せません。</div>
+            <div style={{display:"flex",gap:10}}>
+              <button className="tsa-btn" onClick={()=>setConfirm(false)} style={{flex:1,background:"#fff",border:`1px solid ${C.line}`,color:C.inkSub}}>やめる</button>
+              <button className="tsa-btn" onClick={onDelete} style={{flex:1,background:C.warn,color:"#fff"}}>削除する</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* =========================================================================
+   Post Form (register / edit)
+   ========================================================================= */
+function PostForm({initial, onSave, onCancel}) {
+  const [f,setF]=useState(initial);
+  const [img,setImg]=useState(null);        // base64 or null
+  const [imgChanged,setImgChanged]=useState(false);
+  const [pasteText,setPasteText]=useState("");
+  const [pasteMsg,setPasteMsg]=useState(null);
+  const fileRef = useRef();
+  const set = (k,v)=>setF(s=>({...s,[k]:v}));
+
+  function applyPaste(){
+    const mapped = parseGptOutput(pasteText);
+    const keys = Object.keys(mapped);
+    if(keys.length===0){ setPasteMsg({ok:false,text:"読み取れませんでした。形式（JSON または「項目：値」）を確認してください。"}); return; }
+    setF(s=>{
+      const n={...s};
+      for(const [k,v] of Object.entries(mapped)){
+        if(k==="genre"){ const o=matchOption(v,GENRES); if(o)n.genre=o; }
+        else if(k==="type"){ const o=matchOption(v,TYPES); if(o)n.type=o; }
+        else if(k==="purpose"){ const o=matchOption(v,PURPOSES); if(o)n.purpose=o; }
+        else if(k==="noteLink"){ n.noteLink=boolify(v); }
+        else if(k==="gptScore"){ const d=String(v).match(/[1-5]/); if(d)n.gptScore=d[0]; }
+        else n[k]=String(v);
+      }
+      return n;
+    });
+    setPasteMsg({ok:true,text:`${keys.length}項目を反映しました。内容を確認して保存してください。`});
+  }
+
+  useEffect(()=>{ if(initial.hasImage) loadImage(initial.id).then(d=>setImg(d)); },[initial.id]);
+
+  function pickImage(e){
+    const file = e.target.files?.[0]; if(!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const im = new Image();
+      im.onload = () => {
+        // 縮小して保存サイズを抑える（最大幅900px・JPEG）
+        const maxW=900, scale=Math.min(1,maxW/im.width);
+        const cv=document.createElement("canvas");
+        cv.width=im.width*scale; cv.height=im.height*scale;
+        cv.getContext("2d").drawImage(im,0,0,cv.width,cv.height);
+        setImg(cv.toDataURL("image/jpeg",0.82)); setImgChanged(true);
+      };
+      im.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  }
+
+  const L = ({children}) => <label style={{fontSize:12,fontWeight:600,color:C.ink,display:"block",marginBottom:5}}>{children}</label>;
+  const Field = ({label,children}) => <div style={{marginBottom:14}}><L>{label}</L>{children}</div>;
+  const half = {display:"flex",gap:10};
+
+  function submit(){ onSave(f, imgChanged ? img : undefined); }
+
+  return (
+    <div style={{display:"flex",flexDirection:"column"}}>
+      <Section title="GPTs出力を貼り付け（自動反映）">
+        <textarea className="tsa-in" rows={4} value={pasteText} onChange={e=>setPasteText(e.target.value)}
+          placeholder={'GPTsが出力したJSONブロックをそのまま貼り付け。\n貼り付けたら「反映する」を押すと各項目に振り分けます。'} />
+        <div style={{display:"flex",gap:10,alignItems:"center",marginTop:10,flexWrap:"wrap"}}>
+          <button className="tsa-btn" onClick={applyPaste} style={{background:C.green,color:"#fff"}}>反映する</button>
+          {pasteMsg && <span style={{fontSize:12,color:pasteMsg.ok?C.greenDeep:C.warn,fontWeight:600}}>{pasteMsg.text}</span>}
+        </div>
+        <div style={{fontSize:11,color:C.inkSub,marginTop:10,lineHeight:1.6}}>
+          ※ スクショ画像だけは下の「投稿スクショ」から別途アップロードしてください（テキストには含められないため）。
+        </div>
+      </Section>
+
+      <Section title="基本情報">
+        <div style={half}>
+          <Field label="投稿日"><input className="tsa-in" type="date" value={f.date} onChange={e=>set("date",e.target.value)} /></Field>
+          <Field label="投稿時間"><input className="tsa-in" type="time" value={f.time} onChange={e=>set("time",e.target.value)} /></Field>
+        </div>
+        <Field label="投稿本文">
+          <textarea className="tsa-in" rows={4} value={f.body} onChange={e=>set("body",e.target.value)} placeholder="投稿した本文を貼り付け" />
+        </Field>
+        <Field label="投稿スクショ">
+          <input ref={fileRef} type="file" accept="image/*" onChange={pickImage} style={{display:"none"}} />
+          {img
+            ? <div><img src={img} alt="" style={{width:"100%",borderRadius:10,border:`1px solid ${C.line}`}} />
+                <button className="tsa-btn" onClick={()=>{setImg(null);setImgChanged(true);}} style={{marginTop:8,background:"#fff",border:`1px solid ${C.line}`,color:C.warn,fontSize:13}}>画像を外す</button></div>
+            : <button className="tsa-btn" onClick={()=>fileRef.current?.click()} style={{background:C.beige,color:C.ink,width:"100%",border:`1px dashed ${C.beigeLine}`}}>画像を選ぶ</button>}
+        </Field>
+        <div style={half}>
+          <Field label="投稿ジャンル"><select className="tsa-in" value={f.genre} onChange={e=>set("genre",e.target.value)}>{GENRES.map(g=><option key={g}>{g}</option>)}</select></Field>
+          <Field label="投稿タイプ"><select className="tsa-in" value={f.type} onChange={e=>set("type",e.target.value)}>{TYPES.map(t=><option key={t}>{t}</option>)}</select></Field>
+        </div>
+        <Field label="投稿目的"><select className="tsa-in" value={f.purpose} onChange={e=>set("purpose",e.target.value)}>{PURPOSES.map(p=><option key={p}>{p}</option>)}</select></Field>
+      </Section>
+
+      <Section title="反応の数字">
+        <div style={half}>
+          <Field label="いいね数"><input className="tsa-in" type="number" inputMode="numeric" value={f.likes} onChange={e=>set("likes",e.target.value)} /></Field>
+          <Field label="返信数"><input className="tsa-in" type="number" inputMode="numeric" value={f.replies} onChange={e=>set("replies",e.target.value)} /></Field>
+        </div>
+        <div style={half}>
+          <Field label="再投稿数"><input className="tsa-in" type="number" inputMode="numeric" value={f.reposts} onChange={e=>set("reposts",e.target.value)} /></Field>
+          <Field label="引用数"><input className="tsa-in" type="number" inputMode="numeric" value={f.quotes} onChange={e=>set("quotes",e.target.value)} /></Field>
+        </div>
+        <Field label="表示数"><input className="tsa-in" type="number" inputMode="numeric" value={f.views} onChange={e=>set("views",e.target.value)} /></Field>
+      </Section>
+
+      <Section title="フォロワー">
+        <div style={half}>
+          <Field label="投稿前フォロワー数"><input className="tsa-in" type="number" inputMode="numeric" value={f.followerBefore} onChange={e=>set("followerBefore",e.target.value)} /></Field>
+          <Field label="投稿後フォロワー数"><input className="tsa-in" type="number" inputMode="numeric" value={f.followerAfter} onChange={e=>set("followerAfter",e.target.value)} /></Field>
+        </div>
+        <div style={{fontSize:12,color:C.greenDeep,background:C.greenSoft,borderRadius:8,padding:"8px 11px",marginTop:-4,marginBottom:8}}>
+          増加数：{followerDelta(f)>0?"+":""}{followerDelta(f)}（自動計算）
+        </div>
+      </Section>
+
+      <Section title="note誘導">
+        <label style={{display:"flex",alignItems:"center",gap:9,marginBottom:12,cursor:"pointer",fontSize:14}}>
+          <input type="checkbox" checked={f.noteLink} onChange={e=>set("noteLink",e.target.checked)} style={{width:18,height:18,accentColor:C.greenDeep}} />
+          noteリンクあり
+        </label>
+        {f.noteLink && <Field label="note誘導文"><textarea className="tsa-in" rows={2} value={f.noteText} onChange={e=>set("noteText",e.target.value)} placeholder="どんな誘導文を添えたか" /></Field>}
+      </Section>
+
+      <Section title="GPTs分析と振り返り">
+        <Field label="GPTs分析結果（貼り付け）">
+          <textarea className="tsa-in" rows={4} value={f.gptResult} onChange={e=>set("gptResult",e.target.value)} placeholder="GPTsで分析した結果をそのまま貼り付け" />
+        </Field>
+        <Field label="GPTs評価（任意・1〜5）">
+          <select className="tsa-in" value={f.gptScore} onChange={e=>set("gptScore",e.target.value)} style={{maxWidth:160}}>
+            <option value="">未設定</option>{[1,2,3,4,5].map(n=><option key={n} value={n}>{n}</option>)}
+          </select>
+        </Field>
+        <Field label="伸びた理由"><textarea className="tsa-in" rows={2} value={f.reason} onChange={e=>set("reason",e.target.value)} /></Field>
+        <Field label="改善点"><textarea className="tsa-in" rows={2} value={f.improve} onChange={e=>set("improve",e.target.value)} /></Field>
+        <Field label="次に試すこと"><textarea className="tsa-in" rows={2} value={f.next} onChange={e=>set("next",e.target.value)} /></Field>
+        <Field label="メモ"><textarea className="tsa-in" rows={2} value={f.memo} onChange={e=>set("memo",e.target.value)} /></Field>
+      </Section>
+
+      <div style={{display:"flex",gap:10,marginTop:6}}>
+        <button className="tsa-btn" onClick={onCancel} style={{flex:1,background:"#fff",border:`1px solid ${C.line}`,color:C.inkSub}}>キャンセル</button>
+        <button className="tsa-btn" onClick={submit} style={{flex:2,background:C.greenDeep,color:"#fff"}}>保存する</button>
+      </div>
+    </div>
+  );
+}
+
+function Section({title,children}) {
+  return (
+    <div className="tsa-card" style={{padding:"16px 16px 4px",marginBottom:14}}>
+      <div style={{fontSize:13,fontWeight:700,color:C.greenDeep,marginBottom:14,
+        paddingBottom:8,borderBottom:`1px solid ${C.line}`}}>{title}</div>
+      {children}
+    </div>
+  );
+}
+
+/* =========================================================================
+   Backup（データの書き出し / 読み込み）
+   ========================================================================= */
+function Backup({posts, followers, onExport, onImport}) {
+  const fileRef = useRef();
+  const [pending,setPending] = useState(null); // 読み込み待ちのデータ
+  const [msg,setMsg] = useState(null);
+  const [usage,setUsage] = useState(null);
+
+  useEffect(()=>{ (async()=>{
+    try {
+      let bytes=0; const { keys } = await window.storage.list("tsa:");
+      for (const k of keys) { try { const r = await window.storage.get(k); bytes += (r&&r.value?r.value.length:0)+k.length; } catch {} }
+      setUsage(bytes);
+    } catch {}
+  })(); },[posts,followers]);
+
+  function pickFile(e){
+    const file = e.target.files?.[0]; if(!file) return;
+    const reader = new FileReader();
+    reader.onload = ()=>{
+      try {
+        const json = JSON.parse(reader.result);
+        if(json.app!=="threads-seed" || !Array.isArray(json.posts)) throw new Error("形式エラー");
+        setPending(json); setMsg(null);
+      } catch { setMsg({ok:false,text:"このファイルは読み込めるバックアップではありません。"}); }
+    };
+    reader.readAsText(file); e.target.value="";
+  }
+  async function doImport(mode){
+    const n = pending.posts.length, f = (pending.followers||[]).length;
+    await onImport(pending, mode);
+    setPending(null);
+    setMsg({ok:true,text:`読み込み完了：投稿${n}件・フォロワー記録${f}件を${mode==="replace"?"置き換え":"追加"}ました。`});
+  }
+  async function handleExport(){ await onExport(); setMsg({ok:true,text:"バックアップファイルを書き出しました。"}); }
+
+  const kb = usage!=null ? (usage/1024).toFixed(usage>1024*100?0:1) : null;
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      <div className="tsa-card" style={{padding:"16px"}}>
+        <div style={{fontSize:13,fontWeight:700,color:C.greenDeep,marginBottom:6}}>書き出し（バックアップ）</div>
+        <div style={{fontSize:12.5,color:C.inkSub,lineHeight:1.7,marginBottom:14}}>
+          投稿・フォロワー記録・スクショ画像をまとめて1つのJSONファイルに保存します。別の端末へ引っ越すときや、消えてしまう前の保険に使えます。
+        </div>
+        <button className="tsa-btn" onClick={handleExport} style={{background:C.greenDeep,color:"#fff",width:"100%"}}>
+          バックアップを書き出す
+        </button>
+        {usage!=null && <div style={{fontSize:11,color:C.inkSub,marginTop:10}}>現在の保存データ量の目安：約 {kb} KB（5MB前後が上限の目安です）</div>}
+      </div>
+
+      <div className="tsa-card" style={{padding:"16px"}}>
+        <div style={{fontSize:13,fontWeight:700,color:C.greenDeep,marginBottom:6}}>読み込み（復元・引っ越し）</div>
+        <div style={{fontSize:12.5,color:C.inkSub,lineHeight:1.7,marginBottom:14}}>
+          書き出したJSONファイルを選んで、データを復元します。
+        </div>
+        <input ref={fileRef} type="file" accept="application/json,.json" onChange={pickFile} style={{display:"none"}} />
+        <button className="tsa-btn" onClick={()=>fileRef.current?.click()}
+          style={{background:C.beige,color:C.ink,width:"100%",border:`1px solid ${C.beigeLine}`}}>
+          バックアップファイルを選ぶ
+        </button>
+
+        {pending && (
+          <div style={{marginTop:14,padding:"12px 13px",background:C.greenSoft,borderRadius:10}}>
+            <div style={{fontSize:12.5,marginBottom:10}}>
+              読み込む内容：投稿 <b>{pending.posts.length}</b> 件・フォロワー記録 <b>{(pending.followers||[]).length}</b> 件
+              {pending.exportedAt && <span style={{color:C.inkSub}}>（{pending.exportedAt.slice(0,10)} 書き出し）</span>}
+            </div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              <button className="tsa-btn" onClick={()=>doImport("merge")} style={{flex:1,background:C.green,color:"#fff",fontSize:13}}>追加（マージ）</button>
+              <button className="tsa-btn" onClick={()=>doImport("replace")} style={{flex:1,background:C.warn,color:"#fff",fontSize:13}}>全て置き換え</button>
+              <button className="tsa-btn" onClick={()=>setPending(null)} style={{flex:"1 1 100%",background:"#fff",border:`1px solid ${C.line}`,color:C.inkSub,fontSize:13}}>やめる</button>
+            </div>
+            <div style={{fontSize:11,color:C.inkSub,marginTop:8,lineHeight:1.6}}>
+              「追加」は今のデータに足します（同じ投稿・同じ日付は新しい方で上書き）。「全て置き換え」は今のデータを消してファイルの内容にします。
+            </div>
+          </div>
+        )}
+      </div>
+
+      {msg && <div className="tsa-card" style={{padding:"12px 16px",fontSize:13,fontWeight:600,
+        color:msg.ok?C.greenDeep:C.warn}}>{msg.text}</div>}
+    </div>
+  );
+}
+
+/* =========================================================================
+   Analysis / Compare
+   ========================================================================= */
+function Analysis({posts}) {
+  const a = useMemo(()=>{
+    if(posts.length===0) return null;
+    const groupAvg = (key, val) => {
+      const g={};
+      posts.forEach(p=>{ const k=p[key]; if(!g[k]) g[k]={sum:0,n:0}; g[k].sum+=val(p); g[k].n++; });
+      return Object.entries(g).map(([k,v])=>({k,avg:v.sum/v.n,n:v.n})).sort((x,y)=>y.avg-x.avg);
+    };
+    const genreByGrowth = groupAvg("genre", followerDelta);
+    const typeByGrowth  = groupAvg("type", followerDelta);
+    // 時間帯（2時間バケット）× 平均反応
+    const buckets={};
+    posts.forEach(p=>{ const h=parseInt((p.time||"0:0").split(":")[0],10)||0; const b=Math.floor(h/2)*2;
+      const lab=`${String(b).padStart(2,"0")}–${String(b+2).padStart(2,"0")}時`;
+      if(!buckets[lab]) buckets[lab]={sum:0,n:0}; buckets[lab].sum+=reactions(p); buckets[lab].n++; });
+    const timeByReaction = Object.entries(buckets).map(([k,v])=>({k,avg:v.sum/v.n,n:v.n})).sort((x,y)=>y.avg-x.avg);
+
+    const top = (val,filter=()=>true)=>[...posts].filter(filter).sort((x,y)=>val(y)-val(x)).slice(0,3);
+    return {
+      genreByGrowth, typeByGrowth, timeByReaction,
+      topGrowth: top(followerDelta).filter(p=>followerDelta(p)>0),
+      topNote: top(reactions, p=>p.noteLink),
+      topLikes: top(p=>num(p.likes)),
+      topReplies: top(p=>num(p.replies)),
+      topViews: top(p=>num(p.views)),
+      topGpt: top(p=>num(p.gptScore)).filter(p=>num(p.gptScore)>0),
+      bestTheme: genreByGrowth[0],
+    };
+  },[posts]);
+
+  if(!a) return <Empty msg="分析するデータがありません。投稿を登録すると傾向が見えてきます。" />;
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+      <BarBlock title="伸びやすい投稿ジャンル" sub="平均フォロワー増加数" rows={a.genreByGrowth} unit="" />
+      <BarBlock title="伸びやすい投稿タイプ" sub="平均フォロワー増加数" rows={a.typeByGrowth} unit="" />
+      <BarBlock title="反応がよい投稿時間" sub="平均反応数（いいね＋返信＋再投稿＋引用）" rows={a.timeByReaction} unit="" />
+
+      <RankBlock title="フォロワーが増えやすい投稿" posts={a.topGrowth} metric={p=>`+${followerDelta(p)}`} empty="まだ増加実績がありません" />
+      <RankBlock title="note誘導につながりやすい投稿" posts={a.topNote} metric={p=>`反応 ${reactions(p)}`} empty="note誘導投稿がまだありません" />
+      <RankBlock title="いいねが多い投稿" posts={a.topLikes} metric={p=>`♡ ${num(p.likes)}`} />
+      <RankBlock title="返信が多い投稿" posts={a.topReplies} metric={p=>`↩ ${num(p.replies)}`} />
+      <RankBlock title="表示数が多い投稿" posts={a.topViews} metric={p=>`👁 ${num(p.views).toLocaleString()}`} />
+      <RankBlock title="GPTs評価が高い投稿" posts={a.topGpt} metric={p=>`評価 ${p.gptScore}/5`} empty="GPTs評価を入力すると表示されます" />
+
+      <div className="tsa-card" style={{padding:"16px 18px"}}>
+        <div style={{fontSize:13,fontWeight:700,marginBottom:8}}>次に増やすべき投稿テーマ</div>
+        {a.bestTheme && a.bestTheme.avg>0
+          ? <div style={{fontSize:14,lineHeight:1.7}}>
+              いま最も伸びているのは <b style={{color:C.greenDeep}}>「{a.bestTheme.k}」</b>（平均 +{a.bestTheme.avg.toFixed(1)} フォロワー／{a.bestTheme.n}件）。
+              ここを軸に投稿数を増やすのがおすすめです。
+            </div>
+          : <div style={{fontSize:13.5,color:C.inkSub}}>フォロワー数を数件分入力すると、伸びているテーマを提案します。</div>}
+      </div>
+    </div>
+  );
+}
+
+function BarBlock({title,sub,rows,unit}) {
+  const max = Math.max(...rows.map(r=>Math.abs(r.avg)),1);
+  return (
+    <div className="tsa-card" style={{padding:"15px 16px"}}>
+      <div style={{fontSize:13,fontWeight:700}}>{title}</div>
+      <div style={{fontSize:11,color:C.inkSub,marginBottom:12}}>{sub}</div>
+      {rows.map((r,i)=>(
+        <div key={r.k} style={{marginBottom:9}}>
+          <div style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:4}}>
+            <span style={{color:i===0?C.greenDeep:C.ink,fontWeight:i===0?700:500}}>{r.k} <span style={{color:C.inkSub,fontSize:10.5}}>({r.n}件)</span></span>
+            <span style={{fontWeight:700}}>{r.avg>0?"+":""}{r.avg.toFixed(1)}{unit}</span>
+          </div>
+          <div style={{height:8,background:C.bg,borderRadius:5,overflow:"hidden"}}>
+            <div style={{height:"100%",width:`${Math.abs(r.avg)/max*100}%`,
+              background:r.avg>=0?C.green:C.beigeLine,borderRadius:5}} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RankBlock({title,posts,metric,empty}) {
+  return (
+    <div className="tsa-card" style={{padding:"15px 16px"}}>
+      <div style={{fontSize:13,fontWeight:700,marginBottom:10}}>{title}</div>
+      {posts.length===0 && <div style={{fontSize:12.5,color:C.inkSub}}>{empty||"データがありません"}</div>}
+      {posts.map((p,i)=>(
+        <div key={p.id} style={{display:"flex",gap:11,alignItems:"flex-start",padding:"8px 0",borderTop:i?`1px solid ${C.line}`:"none"}}>
+          <span style={{fontSize:13,fontWeight:800,color:C.green,minWidth:16}}>{i+1}</span>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:13,lineHeight:1.5,display:"-webkit-box",WebkitLineClamp:1,WebkitBoxOrient:"vertical",overflow:"hidden"}}>{p.body||"（本文なし）"}</div>
+            <div style={{fontSize:10.5,color:C.inkSub,marginTop:2}}>{p.date}・{p.genre}・{p.type}</div>
+          </div>
+          <span style={{fontSize:13,fontWeight:700,color:C.greenDeep,whiteSpace:"nowrap"}}>{metric(p)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App/>);
+</script>
+</body>
+</html>
